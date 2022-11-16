@@ -1,0 +1,1009 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "AWS CloudFormation to setup serverless setup for pgbadger reports"
+
+###############################################################################
+# Metadata
+###############################################################################
+
+Metadata:
+  Authors:
+    Description: "Chirag Dave (davechir@amazon.com)"
+
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Parent Networking Stack
+        Parameters:
+          - ParentVPCStack
+      - Label:
+          default: RDS/Aurora Instance name
+        Parameters:
+          - PGLogGroupName
+      - Label:
+          default: Bucket names
+        Parameters:
+          - HTMLReportsBucket
+          - PGLogsBucket
+      - Label:
+          default: Log Retention
+        Parameters:
+          - RetentionInDays
+      - Label:
+          default: EFS
+        Parameters:
+          - Encryption
+          - FileSystemName
+      - Label:
+          default: ECR
+        Parameters:
+          - ECRRepo
+          - ImageTag
+
+###############################################################################
+# Parameters
+###############################################################################
+
+Parameters:
+  ParentVPCStack:
+    Description: >
+      Provide Stack name of parent VPC stack based on VPC-3AZ yaml template.
+       Refer Cloudformation dashboard in AWS Console to get this.
+    Type: String
+    MinLength: "1"
+    MaxLength: "128"
+    AllowedPattern: '^[a-zA-Z]+[0-9a-zA-Z\-]*$'
+
+  ECRRepo:
+    Type: String
+    Description: Name of the ECR repository?
+    Default: "pgbadger-executor-py"
+
+  ImageTag:
+    Type: String
+    Description: Image tag for Lambda function?
+    Default: "1.0"
+
+  RetentionInDays:
+    Type: Number
+    Description: Number of days to keep logs
+    Default: 3
+
+  HTMLReportsBucket:
+    Type: String
+    Description: Name of the bucket for pgbadger HTML reports
+
+  PGLogsBucket:
+    Type: String
+    Description: Name of the bucket for pg logs
+
+  BadgerOutputDir:
+    Description: Output directory for pgbadger, this will be mounted on EFS
+    Default: "/mnt/pgbadger-logs"
+    Type: String
+
+  BadgerOutputFile:
+    Description: Name of the pgbadger output html file
+    Default: "result.html"
+    Type: String
+
+  PGLogGroupName:
+    Type: String
+    Description: Name Enter name of database cloudwatch log group containing PG logs  exmaple /aws/rds/instance/mydb/postgresql
+
+  # EFS FileSystem Parameters
+  Encryption:
+    Type: String
+    Description: Enable Encryption for the FileSystem?
+    ConstraintDescription: Must be a boolean value (true / false)
+    AllowedValues:
+      - true
+      - false
+    Default: true
+
+  FileSystemName:
+    Type: String
+    Description: Name for tagging the EFS FileSystem
+    Default: pgbadger-efs
+
+
+###############################################################################
+# Resources
+###############################################################################
+
+Resources:
+
+  PgBagerKMSCMK:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: 'AWS::KMS::Key'
+    DeletionPolicy: Retain
+    Properties:
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+             AWS: [ !Sub "arn:aws:iam::${AWS::AccountId}:root" ]
+          Action:
+            - "kms:*"
+          Resource: "*"
+        - Effect: Allow
+          Principal:
+             "Service":
+               - "s3.amazonaws.com"
+               - "events.amazonaws.com"
+               - "sqs.amazonaws.com"
+               - "firehose.amazonaws.com"
+               - "elasticfilesystem.amazonaws.com"
+               - "lambda.amazonaws.com"
+          Action:
+            - "kms:Encrypt"
+            - "kms:Decrypt"
+            - "kms:ReEncrypt*"
+            - "kms:GenerateDataKey*"
+            - "kms:DescribeKey"
+          Resource: 
+            - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:*"
+
+  PgBagerKMSCMKAlias:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: 'AWS::KMS::Alias'
+    Properties:
+      AliasName: !Sub "alias/${AWS::StackName}-PgBagerKMSCMK"
+      TargetKeyId: !Ref PgBagerKMSCMK
+
+  # IAM and Policies
+  KinesisDataFirehoseRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service:
+              - firehose.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+      RoleName: !Sub "${AWS::StackName}-KinesisDataFirehoseRole"
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: iam
+        - Key: Stage
+          Value: producer
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-KinesisDataFirehoseRole"
+
+  KinesisDataFirehosePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-KinesisDataFirehosePolicy"
+      Roles:
+        - !Ref KinesisDataFirehoseRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "logs:CreateLogGroup"
+              - "cloudformation:DeleteStack"
+            Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:*"
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource:
+              - !GetAtt PgBagerKMSCMK.Arn
+          - Effect: Allow
+            Action:
+              - "s3:AbortMultipartUpload"
+              - "s3:GetBucketLocation"
+              - "s3:GetObject"
+              - "s3:ListBucket"
+              - "s3:ListBucketMultipartUploads"
+              - "s3:PutObject"
+            Resource:
+              - !Sub arn:aws:s3:::${S3Bucket}
+              - !Sub arn:aws:s3:::${S3Bucket}/*
+          - Effect: Allow
+            Action:
+              - "lambda:InvokeFunction"
+              - "lambda:GetFunctionConfiguration"
+            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${BadgerTransformerFunction}*"
+          - Effect: Allow
+            Action:
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/${AWS::StackName}-pgbadger-delivery-stream*"
+          - Effect: Allow
+            Action:
+              - "kinesis:DescribeStream"
+              - "kinesis:GetShardIterator"
+              - "kinesis:GetRecords"
+            Resource: !Sub "arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${Firehose}"
+
+  CWLtoKinesisFirehoseRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2008-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      RoleName: !Sub "${AWS::StackName}-CWLtoKinesisFirehoseRole"
+      Path: /
+      ManagedPolicyArns:
+        - !Ref CWLtoKinesisFirehosePolicy
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-CWLtoKinesisFirehoseRole"
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: iam
+        - Key: Stage
+          Value: producer
+
+  CWLtoKinesisFirehosePolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: Policy for Firehose access
+      Path: /
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "firehose:PutRecord"
+              - "firehose:CreateDeliveryStream"
+              - "firehose:DescribeDeliveryStream"
+              - "firehose:ListDeliveryStreams"
+              - "firehose:ListTagsForDeliveryStream"
+              - "firehose:PutRecordBatch"
+              - "firehose:StartDeliveryStreamEncryption"
+              - "firehose:StopDeliveryStreamEncryption"
+              - "firehose:TagDeliveryStream"
+              - "firehose:UntagDeliveryStream"
+              - "firehose:UpdateDestination"
+            Resource: !Sub "arn:aws:firehose:${AWS::Region}:${AWS::AccountId}:*"
+
+  AccessS3LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      RoleName: !Sub "${AWS::StackName}-S3AccessRole"
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: iam
+        - Key: Stage
+          Value: consumer
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-AccessS3LambdaRole"
+
+  AccessS3LambdaPolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-AccessS3LambdaPolicy"
+      Roles:
+        - !Ref AccessS3LambdaRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogGroup"
+            Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+          - Effect: Allow
+            Action:
+              - "firehose:PutRecordBatch"
+            Resource:
+              [
+                !Sub "arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${Firehose}/*",
+                !Sub "arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${Firehose}",
+              ]
+
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource:
+              [
+                !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-pgbadger-transfomer/*",
+                !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-pgbadger-transfomer",
+                !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-pgbadger-transfomer:*",
+              ]
+
+  LambdaExRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-LambdaExRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonElasticFileSystemFullAccess
+        - !Ref LambdaExPolicy
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "sts:AssumeRole"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: iam
+        - Key: Stage
+          Value: consumer
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-LambdaExRole"
+
+  LambdaExPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      Description: Policy to allow Lambda to access to S3, SQS and EFS
+      ManagedPolicyName: !Sub "${AWS::StackName}-LambdaExPolicy"
+      Path: /
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource:
+              - !GetAtt PgBagerKMSCMK.Arn
+          - Effect: Allow
+            Action:
+              - sqs:GetQueueAttributes
+              - sqs:ChangeMessageVisibility
+              - sqs:DeleteMessage
+              - sqs:ReceiveMessage
+            Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${AWS::StackName}-pgbadger-queue"
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource:
+              [
+                !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-pgbadger-executor:*",
+                !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-pgbadger-executor/*",
+              ]
+
+  #logging
+
+  # CloudWatch Logs 
+  CloudWatchLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/kinesisfirehose/${AWS::StackName}-pgbadger-delivery-stream"
+      RetentionInDays: !Sub ${RetentionInDays}
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: telemetry
+        - Key: Stage
+          Value: producer
+        - Key: Name
+          Value: !Sub "/aws/kinesisfirehose/${AWS::StackName}-pgbadger-delivery-stream"
+
+  # CloudWatch Logs
+  LambdaLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-pgbadger-transfomer"
+      RetentionInDays: !Sub ${RetentionInDays}
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: telemetry
+        - Key: Stage
+          Value: producer
+        - Key: Name
+          Value: !Sub "/aws/lambda/${AWS::StackName}-pgbadger-transfomer"
+
+
+  # CloudWatch Logs
+  PgBadgerLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-pgbadger-executor"
+      RetentionInDays: !Sub ${RetentionInDays}
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: telemetry
+        - Key: Stage
+          Value: consumer
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-pgbadger-executor"
+
+  SubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      RoleArn:
+        Fn::GetAtt:
+          - "CWLtoKinesisFirehoseRole"
+          - "Arn"
+      LogGroupName: !Sub ${PGLogGroupName}
+      FilterPattern: ""
+      DestinationArn:
+        Fn::GetAtt:
+          - "Firehose"
+          - "Arn"
+
+  KinesisFirehoseLogStream:
+    Type: AWS::Logs::LogStream
+    DependsOn:
+      - Firehose
+    Properties:
+      LogGroupName: !Sub "/aws/kinesisfirehose/${AWS::StackName}-pgbadger-delivery-stream"
+      LogStreamName: DestinationDelivery
+
+
+  ###################################################
+
+  Firehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    DependsOn: S3Bucket
+    Properties:
+      DeliveryStreamName: !Sub "${AWS::StackName}-pgbadger-delivery-stream"
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt S3Bucket.Arn
+        BufferingHints:
+          SizeInMBs: 5
+          IntervalInSeconds: 300
+        CompressionFormat: GZIP
+        RoleARN: !GetAtt KinesisDataFirehoseRole.Arn
+        DynamicPartitioningConfiguration:
+          Enabled: false
+          RetryOptions:
+            DurationInSeconds: 300
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Sub "/aws/kinesisfirehose/${AWS::StackName}-pgbadger-delivery-stream" #TODO: replace this with variable?
+          LogStreamName: DestinationDelivery
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt BadgerTransformerFunction.Arn
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: "60"
+                - ParameterName: BufferSizeInMBs
+                  ParameterValue: "3"
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: message
+        - Key: Stage
+          Value: producer
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-Firehose"
+
+  ###################################################
+  #lambda
+
+  BadgerTransformerFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        ZipFile: >
+
+          import base64
+
+          import json
+
+          import gzip
+
+          def transformLogEvent(log_event):
+              return log_event['message']
+
+          def lambda_handler(event, context):
+              output = []
+              for record in event.get('records', []):
+                  compressed_payload = base64.b64decode(record['data'])
+                  uncompressed_payload = gzip.decompress(compressed_payload)
+                  payload = json.loads(uncompressed_payload)
+                  joinedData = '\n'.join([transformLogEvent(e) for e in payload['logEvents']])
+                  joinedData = joinedData + '\n'
+                  compressed_payload = gzip.compress(bytes(joinedData, 'utf-8'))
+                  encodedData = base64.b64encode(compressed_payload)
+                  output_record = {
+                      'recordId': record['recordId'],
+                      'result': 'Ok',
+                      'data': encodedData
+                  }
+                  output.append(output_record)
+              return {"records": output}
+
+      Description: Lambda function to parse PG logs and push to s3
+      #Handler: lambda_function.lambda_handler
+      Handler: index.lambda_handler
+      Role: !GetAtt AccessS3LambdaRole.Arn
+      MemorySize: 128
+      Runtime: python3.8
+      Timeout: 120
+      ReservedConcurrentExecutions: 10
+      FunctionName: !Sub "${AWS::StackName}-pgbadger-transfomer"
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: compute
+        - Key: Stage
+          Value: producer
+
+  BadgerExecutorFunction:
+    Type: "AWS::Lambda::Function"
+    DependsOn:
+      - MountTarget1
+      - MountTarget2
+      - MountTarget3
+    Properties:
+      PackageType: Image
+      Code:
+        ImageUri: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepo}:${ImageTag}
+      FunctionName: !Sub "${AWS::StackName}-pgbadger-executor"
+      MemorySize: 512
+      Role: !GetAtt LambdaExRole.Arn
+      Timeout: 240 #4min timeout
+      DeadLetterConfig: !Ref "AWS::NoValue"
+      ReservedConcurrentExecutions: 1
+      TracingConfig:
+        Mode: "PassThrough"
+      FileSystemConfigs:
+        - Arn: !GetAtt EFSAccessPoint.Arn
+          LocalMountPath: /mnt/pgbadger-logs
+      Environment:
+        Variables:
+          BADGER_OUTPUT_DIR: !Ref BadgerOutputDir
+          BADGER_OUTPUT_FILE: !Ref BadgerOutputFile
+      VpcConfig:
+        SecurityGroupIds:
+          - { "Fn::ImportValue": !Sub "${ParentVPCStack}-LambdaSecurityGroup" }
+        SubnetIds:
+          !Split [
+            ",",
+            { "Fn::ImportValue": !Sub "${ParentVPCStack}-SubnetsPrivate" },
+          ]
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: compute
+        - Key: Stage
+          Value: consumer
+
+  ###################################################
+
+  #S3 bucket
+  S3Bucket:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: "AWS::S3::Bucket"
+    DependsOn: SQSQueuePolicy
+    Properties:
+      BucketName: !Ref PGLogsBucket
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:Put
+            Queue: !GetAtt MyQueue.Arn
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !GetAtt PgBagerKMSCMK.Arn
+              SSEAlgorithm: aws:kms
+      VersioningConfiguration:
+        Status: Suspended
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: storage
+        - Key: Stage
+          Value: producer
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-S3Bucket"
+
+  #EFS
+
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      # AvailabilityZoneName: ca-central-1
+      FileSystemPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "elasticfilesystem:ClientRootAccess"
+              - "elasticfilesystem:ClientWrite"
+              - "elasticfilesystem:ClientMount"
+            Principal:
+              AWS: "*"
+            #KmsKeyId: String
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+      BackupPolicy:
+        Status: ENABLED
+      Encrypted: !Ref Encryption
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: storage
+        - Key: Stage
+          Value: consumer
+        - Key: Name
+          Value: !Join
+                -
+                  '-'
+                -
+                  - !Sub "${AWS::StackName}"
+                  - !Ref FileSystemName
+  EFSAccessPoint:
+    Type: "AWS::EFS::AccessPoint"
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      PosixUser:
+        Uid: "1000"
+        Gid: "1000"
+        SecondaryGids:
+          - "1000"
+          - "1000"
+      RootDirectory:
+        CreationInfo:
+          OwnerGid: "1000"
+          OwnerUid: "1000"
+          Permissions: "0777"
+        Path: "/pgbadger-logs"
+      AccessPointTags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: consumer
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-EFSAccessPoint"
+
+  MountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: { "Fn::ImportValue": !Sub "${ParentVPCStack}-SubnetAPrivate" }
+      SecurityGroups:
+        - { "Fn::ImportValue": !Sub "${ParentVPCStack}-EFSSecurityGroup" }
+  MountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: { "Fn::ImportValue": !Sub "${ParentVPCStack}-SubnetBPrivate" }
+      SecurityGroups:
+        - { "Fn::ImportValue": !Sub "${ParentVPCStack}-EFSSecurityGroup" }
+  MountTarget3:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: { "Fn::ImportValue": !Sub "${ParentVPCStack}-SubnetCPrivate" }
+      SecurityGroups:
+        - { "Fn::ImportValue": !Sub "${ParentVPCStack}-EFSSecurityGroup" }
+
+  ###################################################
+  #SQS
+  MyQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      DelaySeconds: 0
+      MaximumMessageSize: 262144 # 256KB
+      MessageRetentionPeriod: 345600 #4 Days
+      QueueName: !Sub "${AWS::StackName}-pgbadger-queue"
+      ReceiveMessageWaitTimeSeconds: 0
+      KmsMasterKeyId: !Ref PgBagerKMSCMK
+      KmsDataKeyReusePeriodSeconds: 86400
+      VisibilityTimeout: 300 #0.5 min
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: message
+        - Key: Stage
+          Value: producer
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-pgbadger-queue"
+
+  SQSTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      #BatchSize: !Ref SQSBatchSize
+      Enabled: true
+      EventSourceArn: !GetAtt MyQueue.Arn
+      FunctionName: !GetAtt BadgerExecutorFunction.Arn
+
+  SQSQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    DependsOn: MyQueue
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: __sender_statement1
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: 
+              - "sqs:SendMessage"
+            Resource: !GetAtt MyQueue.Arn
+            Condition:
+              StringEquals:
+                "aws:SourceAccount" : !Sub "${AWS::AccountId}"
+              ArnLike:
+                "aws:SourceArn": "arn:aws:s3:*:*:*"
+          - Sid: __receiver_statement
+            Effect: Allow
+            Principal:
+              AWS: 
+               - !GetAtt LambdaExRole.Arn
+               - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - "sqs:ChangeMessageVisibility"
+              - "sqs:DeleteMessage"
+              - "sqs:GetQueueAttributes"
+              - "sqs:ReceiveMessage"
+              - "sqs:SendMessage"
+              - "sqs:PurgeQueue"
+            Resource: !GetAtt MyQueue.Arn
+      Queues:
+        - Ref: MyQueue
+
+  ###############################################################################
+  # DataSync
+  ###############################################################################
+
+  #IAM user and policy
+
+  BucketRoleDataSync: 
+      Type: "AWS::IAM::Role"
+      Properties:
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Principal:
+                  Service:
+                    - datasync.amazonaws.com
+                Action:
+                  - 'sts:AssumeRole'
+          RoleName: !Sub '${AWS::StackName}-AWSDataSyncS3BucketAccess'
+          Description: Role to provide access to datasync
+          Policies:
+          - PolicyName: EmbeddedInlinePolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Action:
+                    - 's3:GetBucketLocation'
+                    - 's3:ListBucket'
+                    - 's3:ListBucketMultipartUploads'
+                  Effect: Allow
+                  Resource: !Sub arn:aws:s3:::${S3BucketPGbadger}
+                - Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                    - kms:Encrypt
+                    - kms:GenerateDataKey
+                  Resource:
+                    - !GetAtt PgBagerKMSCMK.Arn
+                - Action:
+                    - 's3:AbortMultipartUpload'
+                    - 's3:DeleteObject'
+                    - 's3:GetObject'
+                    - 's3:ListMultipartUploadParts'
+                    - 's3:PutObjectTagging'
+                    - 's3:GetObjectTagging'
+                    - 's3:PutObject'
+                  Effect: Allow
+                  Resource: !Sub arn:aws:s3:::${S3BucketPGbadger}/*
+          Tags:
+          - Key: Project
+            Value: pgBadger
+          - Key: Category
+            Value: iam
+          - Key: Stage
+            Value: presenter
+          - Key: Name
+            Value: !Sub "${AWS::StackName}-BucketRoleDataSync"
+
+  # s3 bucket
+  S3BucketPGbadger:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Ref HTMLReportsBucket
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+               SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Suspended
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: storage
+        - Key: Stage
+          Value: presenter
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-S3BucketPGbadger"
+
+  #s3 location
+
+  S3Location:
+    Type: AWS::DataSync::LocationS3
+    Properties:
+      S3BucketArn: !GetAtt S3BucketPGbadger.Arn
+      S3Config:
+        BucketAccessRoleArn: !GetAtt BucketRoleDataSync.Arn
+      S3StorageClass: STANDARD
+      #Subdirectory: !Ref s3Prefix
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: presenter
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-S3Location"
+
+  #EFS location
+
+  EFSLocation:
+    Type: AWS::DataSync::LocationEFS
+    DependsOn:
+      - MountTarget1
+      - MountTarget2
+      - MountTarget3
+    Properties:
+      EfsFilesystemArn: !GetAtt EFSFileSystem.Arn
+      Ec2Config:
+        SecurityGroupArns:
+          - {
+              "Fn::ImportValue": !Sub "${ParentVPCStack}-EFSSecurityGroup-ARN",
+            }
+        SubnetArn:
+          { "Fn::ImportValue": !Sub "${ParentVPCStack}-SubnetAPrivate-ARN" }
+      Subdirectory: /pgbadger-logs/html/
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: presenter
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-EFSLocation"
+
+  # # #EfsToS3Task
+
+  EFSToS3Task:
+    Type: AWS::DataSync::Task
+    Properties:
+      Name: "Copy EFS to S3"
+      SourceLocationArn: !Ref EFSLocation
+      DestinationLocationArn: !Ref S3Location
+      Options:
+        VerifyMode: "NONE"
+      Schedule:
+        ScheduleExpression: "cron(0 * * * ? *)"
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: movement
+        - Key: Stage
+          Value: presenter
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-EFSToS3Task"
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref HTMLReportsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            AWS: "*"
+          Action: "s3:GetObject"
+          Condition:
+           StringEquals:
+             "aws:sourceVpce": { "Fn::ImportValue": !Sub "${ParentVPCStack}-VPCS3EndPoint" }
+#             "aws:PrincipalAccount": !Sub "${AWS::AccountId}"
+#             "aws:PrincipalArn": !Sub "arn:aws:iam::${AWS::AccountId}:role/${ParentVPCStack}-EC2Role"
+          Resource:
+            - !Sub "arn:aws:s3:::${S3BucketPGbadger}"
+            - !Sub "arn:aws:s3:::${S3BucketPGbadger}/*"
+
+
+###############################################################################
+# Outputs
+###############################################################################
+
+Outputs:
+  TemplateID:
+    Description: "Template ID"
+    Value: "pgbadger-setup"
+
+  StackName:
+    Description: "Stack name"
+    Value: !Sub "${AWS::StackName}"
+
+  LoggingBucket:
+    Description: "Name of S3 Logging bucket"
+    Value: !GetAtt "S3Bucket.Arn"
+    Export:
+      Name: !Sub "${AWS::StackName}-S3Bucket"
+
+  PGbadgerHTMLBucket:
+    Description: "Name of S3 Logging bucket"
+    Value: !GetAtt "S3BucketPGbadger.Arn"
+    Export:
+      Name: !Sub "${AWS::StackName}-S3BucketPGbadger"
+
+  PGbadgerWebsiteURL:
+    Description: "Name of S3 Static Website URL"
+    Value: !GetAtt "S3BucketPGbadger.WebsiteURL"
+    Export:
+      Name: !Sub "${AWS::StackName}-PGbadgerWebsiteURL"
+
