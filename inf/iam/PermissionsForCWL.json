@@ -1,9 +1,0 @@
-{
-    "Statement" : [
-        {
-            "Effect" : "Allow",
-            "Action" : ["firehose:*"],
-            "Resource" : ["arn:aws:firehose:us-east-2:953536468559"]
-        }
-    ]
-}
