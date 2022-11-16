@@ -1,0 +1,66 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2513
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 AmazonEmber-Regular;}
+{\colortbl;\red255\green255\blue255;\red25\green35\blue47;}
+{\*\expandedcolortbl;;\cssrgb\c12941\c18431\c24314;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww28600\viewh15140\viewkind0
+\deftab720
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs32 \cf2 \expnd0\expndtw0\kerning0
+log_checkpoints = on\
+log_connections = on\
+log_disconnections = on\
+log_duration = off\
+log_error_verbosity = default           # terse, default, or verbose messages\
+log_hostname = off\
+log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '                     # special values:\
+                                        #   %a = application name\
+                                        #   %u = user name\
+                                        #   %d = database name\
+                                        #   %r = remote host and port\
+                                        #   %h = remote host\
+                                        #   %p = process ID\
+                                        #   %t = timestamp without milliseconds\
+                                        #   %m = timestamp with milliseconds\
+                                        #   %n = timestamp with milliseconds (as a Unix epoch)\
+                                        #   %i = command tag\
+                                        #   %e = SQL state\
+                                        #   %c = session ID\
+                                        #   %l = session line number\
+                                        #   %s = session start timestamp\
+                                        #   %v = virtual transaction ID\
+                                        #   %x = transaction ID (0 if none)\
+                                        #   %q = stop here in non-session\
+                                        #        processes\
+                                        #   %% = '%'\
+                                        # e.g. '<%u%%%d> '\
+log_lock_waits = on                     # log lock waits >= deadlock_timeout\
+log_statement = 'none'                  # none, ddl, mod, all\
+log_replication_commands = on\
+log_temp_files = 0                      # log temporary files equal or larger\
+                                        # than the specified size in kilobytes;\
+                                        # -1 disables, 0 logs all temp files\
+log_timezone = 'UTC'\
+\
+log_min_duration_statement = 0  # -1 is disabled, 0 logs all statements\
+\
+log_autovacuum_min_duration = 0 # -1 disables, 0 logs all actions and\
+\
+Here are our defaults for RDS.  If the user wants pgBadger we set this to "0ms", otherwise we use "1000ms"\
+\
+  #\
+  # Default Instance Parameters\
+  #\
+  default_instance_parameters = \{\
+    "autovacuum_freeze_max_age"           = ["500000000", "pending-reboot"]                                                                                           # Autovacuum freeze after 500 million transactions (default: 200m)\
+    "idle_in_transaction_session_timeout" = ["600000", "immediate"]                                                                                                   # Terminate idle in transaction sessions after 10 min (default: 1 day)\
+    "log_autovacuum_min_duration"         = ["0", "pending-reboot"]                                                                                                   # Log all autovaccum actions\
+    "log_connections"                     = ["1", "immediate"]                                                                                                        # Log all connections\
+    "log_disconnections"                  = ["1", "immediate"]                                                                                                        # Log all disconnections\
+    "log_lock_waits"                      = ["1", "immediate"]                                                                                                        # Log all lock waits\
+    "log_min_duration_statement"          = [var.pgbadger_monitoring ? "0" : "1000", "immediate"]                                                                     # Log all SQL statements if using pgBadger, otherwise 1000ms\
+    "log_replication_commands"            = ["1", "immediate"]                                                                                                        # Log all replication commands\
+    "log_temp_files"                      = ["1", "immediate"]                                                                                                        # Log all temp file usage\
+    "password_encryption"                 = local.password_encryption_modifyable ? [lookup(local.params_by_version, "password_encryption")] : ["1", "pending-reboot"] # Use highest password encryption available\
+    "shared_preload_libraries"            = [lookup(local.params_by_version, "shared_preload_libraries"), "pending-reboot"]                                           # Load many more libraries at boot time\
+  \}}

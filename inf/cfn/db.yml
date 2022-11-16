@@ -1,0 +1,519 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cloudformation template to launch AWS Aurora PostgreSQL Cluster"
+Metadata:
+  LICENSE: Apache License Version 2.0
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Source Database configuration
+        Parameters:
+          - DBClusterName
+          - DBEngineVersion
+          - DBInstanceClass
+          - DBMasterUsername
+          - DBMasterUserPassword
+          - DBName
+    ParameterLabels:
+      DBClusterName:
+        default: Source Database Cluster name
+      DBName:
+        default: Source Database name
+      DBInstanceClass:
+        default: Source Database instance class
+      DBMasterUsername:
+        default: Source Database master username
+      DBMasterUserPassword:
+        default: Source Database master password
+      DBEngineVersion:
+        default: Source Database Engine Version
+Outputs:
+  ClusterName:
+    Value: !Ref DBClusterName
+  StackName:
+    Value: !Ref "AWS::StackName"
+  Regionname:
+    Value: !Ref "AWS::Region"
+  VPCid:
+    Value: !GetAtt
+      - PubSubnet1
+      - VpcId
+  Cloud9Env:
+    Value: !Join
+      - ""
+      - - "https://"
+        - !Ref "AWS::Region"
+        - .console.aws.amazon.com/cloud9/home/
+        - "?region="
+        - !Ref "AWS::Region"
+  SubnetID1:
+    Value: !Ref DBSubnet1
+  SubnetID2:
+    Value: !Ref DBSubnet2
+  RDSSecurityGrp:
+    Value: !GetAtt
+      - AuroraVPCSecurityGroup
+      - GroupId
+  DBName:
+    Description: "Amazon Aurora database name"
+    Value: !Ref DBName
+  RDSEndPoint:
+    Description: "Full Amazon Aurora endpoint"
+    Value: !Sub ${AuroraDBCluster.Endpoint.Address}:${AuroraDBCluster.Endpoint.Port}/${DBName}
+Mappings:
+  AuroraVersion:
+    "11.11":
+      DBClustergroup: aurora-postgresql11
+    "12.6":
+      DBClustergroup: aurora-postgresql12
+    "13.4":
+      DBClustergroup: aurora-postgresql13
+Parameters:
+  DBClusterName:
+    Default: "aurora-db"
+    Description: Specify database cluster name.
+    Type: String
+  DBEngineVersion:
+    Default: 13.4
+    AllowedValues:
+      - 11.11
+      - 12.6
+      - 13.4
+    Description: "Specify Aurora PostgreSQL database engine version."
+    Type: String
+  DBInstanceClass:
+    AllowedValues:
+      - db.t3.medium
+      - db.r5.large
+      - db.r5.xlarge
+      - db.r5.2xlarge
+      - db.r5.4xlarge
+    ConstraintDescription: "Must select a valid database instance type."
+    Default: db.r5.large
+    Description: "The name of the compute and memory capacity class of the database instance."
+    Type: String
+  DBMasterUserPassword:
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: 'Must be a minimum of 8 characters, begin with a letter and contain only alphanumeric characters.'
+    Description: "The database admin account password."
+    MaxLength: "64"
+    MinLength: "8"
+    NoEcho: "True"
+    Type: String
+  DBMasterUsername:
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: "Must begin with a letter and contain only alphanumeric characters."
+    Default: pgadmin
+    Description: "The database admin account username."
+    MaxLength: "16"
+    MinLength: "1"
+    Type: String
+  DBName:
+    AllowedPattern: "[a-zA-Z0-9]*"
+    Default: "demo"
+    Description: "Name of the Amazon Aurora database."
+    MaxLength: "64"
+    MinLength: "0"
+    Type: String
+Resources:
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: 10.0.0.0/20
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      Tags:
+        - Key: Application
+          Value: !Ref "AWS::StackId"
+        - Key: Name
+          Value: !Ref "AWS::StackName"
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: all
+
+  DBSubnet1:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.4.0/25
+      AvailabilityZone: !Select
+        - "0"
+        - !GetAZs ""
+      Tags:
+        - Key: Application
+          Value: !Ref "AWS::StackId"
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: producer
+
+  DBSubnet2:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.5.0/25
+      AvailabilityZone: !Select
+        - "1"
+        - !GetAZs ""
+      Tags:
+        - Key: Application
+          Value: !Ref "AWS::StackId"
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: producer
+
+  DBSubnet3:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.6.0/25
+      AvailabilityZone: !Select
+        - "1"
+        - !GetAZs ""
+      Tags:
+        - Key: Application
+          Value: !Ref "AWS::StackId"
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: producer
+
+  PubSubnet1:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/25
+      AvailabilityZone: !Select
+        - "0"
+        - !GetAZs ""
+      Tags:
+        - Key: Application
+          Value: !Ref "AWS::StackId"
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: jump
+
+  PubSubnet2:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/25
+      AvailabilityZone: !Select
+        - "1"
+        - !GetAZs ""
+      Tags:
+        - Key: Application
+          Value: !Ref "AWS::StackId"
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: jump
+
+  PubSubnet3:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.3.0/25
+      AvailabilityZone: !Select
+        - "1"
+        - !GetAZs ""
+      Tags:
+        - Key: Application
+          Value: !Ref "AWS::StackId"
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: jump
+
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: Application
+          Value: !Ref "AWS::StackId"
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: jump
+
+  AttachGateway:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  RouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Application
+          Value: !Ref "AWS::StackId"
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: jump
+
+  Route:
+    Type: "AWS::EC2::Route"
+    DependsOn: AttachGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref RouteTable
+  SubnetRouteTableAssociation1:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref PubSubnet1
+  SubnetRouteTableAssociation2:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref PubSubnet2
+  SubnetRouteTableAssociation3:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref PubSubnet3
+
+  MyprivateRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: all
+
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref MyprivateRouteTable
+      SubnetId: !Ref DBSubnet1
+  PrivateSubnet2RouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref MyprivateRouteTable
+      SubnetId: !Ref DBSubnet2
+  PrivateSubnet3RouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref MyprivateRouteTable
+      SubnetId: !Ref DBSubnet3
+
+  AuroraVPCSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Security group for Aurora PostgreSQL Instances.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "5432"
+          ToPort: "5432"
+          CidrIp: 10.0.0.0/20
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: producer
+
+  EncryptionKey:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::KMS::Key
+    Properties:
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: !Ref AWS::StackName
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: database
+        - Key: Stage
+          Value: producer
+  EncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${AWS::StackName}"
+      TargetKeyId: !Ref EncryptionKey
+
+  RDSDBClusterParameterGroup:
+    Properties:
+      Description: "Aurora PostgreSQL Custom Cluster parameter group"
+      Family: !FindInMap [AuroraVersion, !Ref DBEngineVersion, DBClustergroup]
+      Parameters:
+        autovacuum_vacuum_cost_delay: 10
+        autovacuum_vacuum_cost_limit: 1000
+        log_connections: 1
+        log_disconnections: 1
+        log_lock_waits: 1
+        log_min_duration_statement: 5000
+        log_temp_files: 10240
+        shared_preload_libraries: "auto_explain, pgaudit, pg_stat_statements, pg_hint_plan"
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: database
+        - Key: Stage
+          Value: producer
+
+    Type: "AWS::RDS::DBClusterParameterGroup"
+
+  RDSDBParameterGroup:
+    Properties:
+      Description: "Aurora PostgreSQL Custom DB parameter group"
+      Family: !FindInMap [AuroraVersion, !Ref DBEngineVersion, DBClustergroup]
+      Parameters:
+        log_connections: 1
+        log_disconnections: 1
+        log_lock_waits: 1
+        log_min_duration_statement: 5000
+        log_temp_files: 10240
+        shared_preload_libraries: "auto_explain, pgaudit, pg_stat_statements, pg_hint_plan"
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: database
+        - Key: Stage
+          Value: producer
+
+    Type: "AWS::RDS::DBParameterGroup"
+
+  AuroraDBSubnetGroup:
+    Properties:
+      DBSubnetGroupDescription: "Subnets available for the Amazon Aurora database instance"
+      SubnetIds:
+        - !Ref DBSubnet1
+        - !Ref DBSubnet2
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: producer
+
+    Type: "AWS::RDS::DBSubnetGroup"
+
+  AuroraDBCluster:
+    Properties:
+      BackupRetentionPeriod: 7
+      DatabaseName: !Ref DBName
+      DBClusterIdentifier: !Ref DBClusterName
+      DBClusterParameterGroupName: !Ref RDSDBClusterParameterGroup
+      DBSubnetGroupName: !Ref AuroraDBSubnetGroup
+      Engine: aurora-postgresql
+      EngineVersion: !Ref DBEngineVersion
+      KmsKeyId: !GetAtt EncryptionKey.Arn
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterUserPassword
+      Port: 5432
+      StorageEncrypted: true
+      EnableCloudwatchLogsExports: 
+        - postgresql
+      VpcSecurityGroupIds:
+        - !Ref AuroraVPCSecurityGroup
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: database
+        - Key: Stage
+          Value: producer
+
+    Type: "AWS::RDS::DBCluster"
+  AuroraDB:
+    Properties:
+      AutoMinorVersionUpgrade: true
+      DBClusterIdentifier: !Ref AuroraDBCluster
+      DBInstanceClass: !Ref DBInstanceClass
+      DBParameterGroupName: !Ref RDSDBParameterGroup
+      Engine: aurora-postgresql
+      PubliclyAccessible: false
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: database
+        - Key: Stage
+          Value: producer
+    Type: "AWS::RDS::DBInstance"
+  Cloud9DevIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
+        - "arn:aws:iam::aws:policy/AWSCloudFormationFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonRDSFullAccess"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: /
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: identity
+        - Key: Stage
+          Value: jump
+  Cloud9Environment:
+    Type: "AWS::Cloud9::EnvironmentEC2"
+    Properties:
+      AutomaticStopTimeMinutes: 60
+      ImageId: amazonlinux-2-x86_64
+      InstanceType: t3.medium
+      Name: !Sub "Project-${AWS::StackName}"
+      SubnetId: !Ref PubSubnet1
+      Tags:
+        - Key: Project
+          Value: pgBadger
+        - Key: Category
+          Value: network
+        - Key: Stage
+          Value: jump
