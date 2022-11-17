@@ -39,12 +39,12 @@ This GitHub repository contains:
 
 # Architecture overview
 
-![Architectural diagram](./img/pgbadger-level0-overview-wide.png)
+![Architectural diagram](img/pgbadger-level0-overview-wide.png)
 
 
 ## Setup Instructions:
 
-1. (Optional) Run CloudFormation template `/inf/cfn/db.yml` to create Aurora Database in private VPC, following resources will be created.
+1. (Optional) Run CloudFormation template [`/inf/cfn/db.yml`](inf/cfn/db.yml) to create Aurora Database in private VPC, following resources will be created.
 
 	- VPC
 	- Private/Public subnet and related resources
@@ -52,8 +52,8 @@ This GitHub repository contains:
 
         NOTE: This step is not required if you are deploying solution for existing database in your VPC.
 
-2. Run Cloudformation template `/inf/cfn/vpc-3az.yml`. This template will create brand new VPC and three private subnet to run Lambda and other resources. This cloudformation will also create Windows Server to access pgbadger report.
-3. Run Cloudformation template `/inf/cfn/pgbadger.yml`. Provide parent stack name from Step 2
+2. Run Cloudformation template [`/inf/cfn/vpc-3az.yml`](inf/cfn/vpc-3az.yml). This template will create brand new VPC and three private subnet to run Lambda and other resources. This cloudformation will also create Windows Server to access pgbadger report.
+3. Run Cloudformation template [`/inf/cfn/pgbadger.yml`](inf/cfn/pgbadger.yml). Provide parent stack name from Step 2
 
 ## Viewing reports
 
@@ -66,4 +66,3 @@ Cloudformation output will give you link to URL for pgBadger Website, that will 
 ## License
 
 This library is licensed under the Apache 2.0 License.
-
